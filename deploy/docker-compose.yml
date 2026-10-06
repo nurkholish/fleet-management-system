@@ -1,0 +1,197 @@
+networks:
+  fleet-net:
+    driver: bridge
+
+volumes:
+  pg-data:
+  rabbit-data:
+  mosquitto-data:
+
+services:
+  adminer:
+    image: adminer:4.8.1
+    container_name: fleet-adminer
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+    depends_on:
+      postgres: { condition: service_started }
+    networks: [fleet-net]
+
+  dozzle:
+    image: amir20/dozzle:v8.5.3
+    container_name: fleet-dozzle
+    restart: unless-stopped
+    ports:
+      - "8083:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [fleet-net]
+
+  postgres:
+    image: postgres:16.4-alpine3.20
+    container_name: fleet-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fleet}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fleet_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-fleet_db}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+    networks: [fleet-net]
+
+  rabbitmq:
+    image: rabbitmq:3.13.7-management-alpine
+    container_name: fleet-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-fleet}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-fleet_secret}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbit-data:/var/lib/rabbitmq
+      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    deploy:
+      resources:
+        limits: { cpus: '1.0', memory: 512M }
+    networks: [fleet-net]
+
+  mosquitto:
+    image: eclipse-mosquitto:2.0.20
+    container_name: fleet-mosquitto
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - mosquitto-data:/mosquitto/data
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -h localhost -t '$$SYS/#' -C 1 -W 3 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    deploy:
+      resources:
+        limits: { cpus: '0.5', memory: 256M }
+    networks: [fleet-net]
+
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: backend
+    container_name: fleet-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:  { condition: service_started }
+      rabbitmq:  { condition: service_started }
+      mosquitto: { condition: service_started }
+    ports:
+      - "8080:8080"
+    environment:
+      TJ_CONFIG: /app/configs/config.yaml
+      TJ_APP_ENV: production
+      TJ_APP_LOG_LEVEL: info
+      TJ_POSTGRES_HOST: postgres
+      TJ_POSTGRES_PORT: "5432"
+      TJ_POSTGRES_USER: ${POSTGRES_USER:-fleet}
+      TJ_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fleet_secret}
+      TJ_POSTGRES_DBNAME: ${POSTGRES_DB:-fleet_db}
+      TJ_POSTGRES_SSLMODE: disable
+      TJ_MQTT_BROKER: tcp://mosquitto:1883
+      TJ_MQTT_CLIENT_ID: fleet-management-system-backend
+      TJ_MQTT_TOPIC: "/fleet/vehicle/+/location"
+      TJ_RABBITMQ_URL: amqp://${RABBITMQ_USER:-fleet}:${RABBITMQ_PASS:-fleet_secret}@rabbitmq:5672/
+      TJ_RABBITMQ_EXCHANGE: fleet.events
+      TJ_RABBITMQ_QUEUE: geofence_alerts
+      TJ_RABBITMQ_ROUTING_KEY: geofence.entry
+      TJ_RABBITMQ_DLX_EXCHANGE: fleet.events.dlx
+      TJ_RABBITMQ_DLQ_QUEUE: geofence_alerts.dlq
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits: { cpus: '1.0', memory: 512M }
+    networks: [fleet-net]
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: worker
+    container_name: fleet-worker
+    restart: unless-stopped
+    depends_on:
+      rabbitmq: { condition: service_started }
+    environment:
+      TJ_CONFIG: /app/configs/config.yaml
+      TJ_APP_ENV: production
+      TJ_APP_LOG_LEVEL: info
+      TJ_RABBITMQ_URL: amqp://${RABBITMQ_USER:-fleet}:${RABBITMQ_PASS:-fleet_secret}@rabbitmq:5672/
+      TJ_RABBITMQ_QUEUE: geofence_alerts
+    deploy:
+      resources:
+        limits: { cpus: '0.5', memory: 256M }
+    networks: [fleet-net]
+
+  publisher:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: publisher
+    container_name: fleet-publisher
+    restart: unless-stopped
+    depends_on:
+      mosquitto: { condition: service_started }
+    environment:
+      TJ_CONFIG: /app/configs/config.yaml
+    deploy:
+      resources:
+        limits: { cpus: '0.25', memory: 128M }
+    networks: [fleet-net]
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ""
+    container_name: fleet-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_started
+    ports:
+      - "3000:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/healthz || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks: [fleet-net]

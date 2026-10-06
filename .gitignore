@@ -1,0 +1,24 @@
+# Environment
+# Binaries
+bin/
+*.exe
+
+# Test / coverage
+coverage.out
+coverage.html
+
+# Local env
+deploy/.env
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker local
+*.log

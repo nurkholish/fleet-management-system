@@ -1,0 +1,11 @@
+.git
+.gitignore
+*.md
+bin/
+tmp/
+coverage.out
+node_modules/
+frontend/
+deploy/.env
+postman/
+video/

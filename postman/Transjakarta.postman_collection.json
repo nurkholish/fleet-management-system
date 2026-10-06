@@ -1,0 +1,79 @@
+{
+  "info": {
+    "name": "Fleet API",
+    "description": "Postman collection",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url",   "value": "http://localhost:8080" },
+    { "key": "vehicle_id", "value": "B1234XYZ" },
+    { "key": "start_ts",   "value": "1700000000" },
+    { "key": "end_ts",     "value": "1800000000" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/healthz",
+          "host": ["{{base_url}}"],
+          "path": ["healthz"]
+        }
+      }
+    },
+    {
+      "name": "Ready",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/readyz",
+          "host": ["{{base_url}}"],
+          "path": ["readyz"]
+        }
+      }
+    },
+    {
+      "name": "List Geofences",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/geofences",
+          "host": ["{{base_url}}"],
+          "path": ["geofences"]
+        }
+      }
+    },
+    {
+      "name": "Get Latest Location",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/vehicles/{{vehicle_id}}/location",
+          "host": ["{{base_url}}"],
+          "path": ["vehicles", "{{vehicle_id}}", "location"]
+        }
+      }
+    },
+    {
+      "name": "Get History",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/vehicles/{{vehicle_id}}/history?start={{start_ts}}&end={{end_ts}}",
+          "host": ["{{base_url}}"],
+          "path": ["vehicles", "{{vehicle_id}}", "history"],
+          "query": [
+            { "key": "start", "value": "{{start_ts}}" },
+            { "key": "end",   "value": "{{end_ts}}" }
+          ]
+        }
+      }
+    }
+  ]
+}

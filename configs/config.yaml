@@ -1,0 +1,63 @@
+app:
+  env: development
+  log_level: info
+
+http:
+  port: "8080"
+  read_timeout: 10s
+  write_timeout: 10s
+  idle_timeout: 60s
+
+postgres:
+  host: postgres
+  port: 5432
+  user: fleet
+  password: fleet_secret
+  dbname: fleet_db
+  sslmode: disable
+  max_open_conns: 25
+  min_conns: 5
+  conn_max_lifetime: 30m
+
+mqtt:
+  broker: tcp://mosquitto:1883
+  client_id: fleet-management-system-backend
+  topic: "/fleet/vehicle/+/location"
+  qos: 1
+  keep_alive: 30s
+  connect_timeout: 10s
+  worker_pool: 4
+  job_buffer: 1000
+  clean_session: false
+
+rabbitmq:
+  url: amqp://fleet:fleet_secret@rabbitmq:5672/
+  exchange: fleet.events
+  exchange_type: topic
+  queue: geofence_alerts
+  routing_key: geofence.entry
+  dlx_exchange: fleet.events.dlx
+  dlq_queue: geofence_alerts.dlq
+
+geofence:
+  items:
+    - id: monas
+      name: "Monas"
+      latitude: -6.175392
+      longitude: 106.827153
+      radius_meters: 50
+    - id: blok_m
+      name: "Blok M"
+      latitude: -6.2444
+      longitude: 106.8006
+      radius_meters: 50
+
+history:
+  max_range_seconds: 9999999999 # unlimited 
+  default_limit: 1000
+  max_limit: 10000
+
+publisher:
+  vehicle_id: B1234XYZ
+  interval: 2s
+  reach_meters: 30
