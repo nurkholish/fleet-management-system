@@ -38,9 +38,7 @@ state-based geofence detection, and RabbitMQ event publishing.
 - **Graceful shutdown** — ordered draining: HTTP → MQTT → RabbitMQ → PostgreSQL.
 - **Structured logging** — zerolog JSON with request IDs for full traceability.
 - **Race-detector-clean tests** — `go test -race ./...` passes on the entire
-  codebase, including a 100-goroutine concurrency test for the geofence state.
-- **Zero-allocation hot path** — geofence evaluation uses Haversine with
-  pre-allocated slices and lock-scoped map access.
+  codebase, including a concurrency test for the geofence state.
 
 ---
 
@@ -113,7 +111,7 @@ state-based geofence detection, and RabbitMQ event publishing.
 
 | Feature | Implementation | Why it matters |
 |---------|---------------|----------------|
-| **MQTT subscriber** with worker pool | `internal/adapter/mqtt/subscriber.go` — 4 workers, 1000-job buffered channel, backpressure via drop+warn | Isolates paho callback from slow DB writes; prevents paho ping timeout |
+| **MQTT subscriber** with worker pool | `internal/adapter/mqtt/subscriber.go` — configurable workers, buffered jobs channel, backpressure via drop+warn | Isolates paho callback from slow DB writes; prevents paho ping timeout |
 | **Strict JSON decoding** | `json.Decoder` + `DisallowUnknownFields()` + trailing-data check | Rejects malformed and injection-attempt payloads |
 | **Topic ↔ payload cross-validation** | `extractVehicleIDFromTopic(topic)` compared against `loc.VehicleID` | Prevents a publisher from spoofing another vehicle's ID |
 | **Plate regex validation** | `^[A-Z]{1,2}\d{1,4}[A-Z]{0,3}$` | Standard Indonesian plate format |
@@ -126,8 +124,8 @@ state-based geofence detection, and RabbitMQ event publishing.
 | **Request ID middleware** | Reads/generates `X-Request-ID`, injects into request-scoped logger | End-to-end tracing across logs |
 | **Security headers** | `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN` | Basic hardening against MIME sniffing + clickjacking |
 | **Graceful shutdown** | Ordered: HTTP → MQTT (drain) → RabbitMQ → PostgreSQL | No data loss on redeploy |
-| **Environment-aware Gin mode** | `gin.ReleaseMode` in production | Reduces log noise, safer in prod |
-| **Connection pool** | pgxpool min/max/lifetime + health check every 30s | Prevents stale connections + thundering herd |
+| **Environment-aware Gin mode** | `gin.ReleaseMode` when `APP_ENV=production` | Reduces log noise in prod |
+| **Connection pool** | pgxpool with min/max/lifetime + health check every 30s | Prevents stale connections + thundering herd |
 | **Cursor pagination** | `next_cursor = last_ts + 1`, `has_more` flag | Stable, efficient pagination without OFFSET scans |
 
 ### Worker (`cmd/worker`)
@@ -147,7 +145,7 @@ state-based geofence detection, and RabbitMQ event publishing.
 
 | Feature | Implementation | Why it matters |
 |---------|---------------|----------------|
-| **Route simulation** | Exponential approach between 2 waypoints (default: Blok M ↔ Monas) | Generates realistic GPS trails for demo |
+| **Route simulation** | Exponential approach; advances waypoint when within 30m (`publisher.reach_meters`) |
 | **GPS jitter** | ±3 m noise per tick | Avoids perfectly straight lines; mimics real GPS |
 | **Waypoint cycling** | Reaches target → advances to next waypoint | Produces repeated geofence entries for testing |
 | **Configurable via env only** | `TJ_MQTT_BROKER`, `TJ_VEHICLE_ID`, `TJ_PUBLISH_INTERVAL`, `TJ_REACH_METERS`, `TJ_ROUTE` | Decoupled from backend config |
@@ -164,8 +162,8 @@ state-based geofence detection, and RabbitMQ event publishing.
 | **Unknown-field rejection** | `DisallowUnknownFields` |
 | **Trailing-data rejection** | Second `Decode` + `io.EOF` check |
 | **Payload ↔ topic check** | Reject when mismatch |
-| **Worker pool** | 4 goroutines (configurable) |
-| **Job buffer** | 1000 messages (configurable) |
+| **Worker pool** | 4 goroutines (default, `mqtt.worker_pool`) |
+| **Job buffer** | 1000 messages (default, `mqtt.job_buffer`) |
 | **Backpressure** | Drop + warn when buffer full |
 | **Graceful unsubscribe** | Wait up to 2s, then disconnect |
 | **Panic recovery** | Per-message recover in handler wrapper |
@@ -179,7 +177,7 @@ state-based geofence detection, and RabbitMQ event publishing.
 | **Concurrency-safe** | `sync.Mutex` around map access |
 | **Reset / rollback** | `Reset` used on publish failure so next tick retries |
 | **Multi-vehicle, multi-fence** | Independent state per `(vehicle, fence)` pair |
-| **Race detector clean** | 100 goroutines × 100 iterations test |
+| **Race detector clean** | Concurrent access test with `-race` |
 
 ### PostgreSQL Adapter (`internal/adapter/postgres`)
 
@@ -214,13 +212,14 @@ state-based geofence detection, and RabbitMQ event publishing.
 | **QoS prefetch 1** | Fair dispatch across workers |
 | **Nack → DLQ** | Malformed JSON routed to DLQ |
 | **Ack on success** | At-least-once preserved |
-| **Context-aware consume** | Clean shutdown via ctx.Done() |
+| **Context-aware consume** | Clean shutdown via `ctx.Done()` |
 
 ### Retry (`pkg/retry`)
 
 | Feature | Implementation |
 |---------|---------------|
 | **Exponential backoff** | 500ms → 30s (capped) |
+| **Max attempts** | 10 per connection (configurable via caller) |
 | **Jitter** | 0–50% of current backoff |
 | **Context-aware** | Returns `ctx.Err()` on cancellation |
 | **Injectable sleep** | `sleepFn` package variable → testable without real delays |
@@ -233,8 +232,8 @@ state-based geofence detection, and RabbitMQ event publishing.
 |---------|---------------|
 | **Haversine distance** | Great-circle distance in meters |
 | **Earth radius** | `6371000.0` m (WGS84 mean) |
-| **Zero-allocation** | All math in registers, no heap |
-| **100% coverage** | Unit tested with boundary checks |
+| **Pure math** | Sin/Cos/Atan2 — no heap allocation on the hot path |
+| **Tested** | Unit tested with boundary checks |
 
 ### Frontend (`frontend/`)
 
@@ -243,19 +242,19 @@ state-based geofence detection, and RabbitMQ event publishing.
 | **Real-time map** | Leaflet + OpenStreetMap with live marker |
 | **Route polyline** | Blue line connecting history points |
 | **Geofence overlay** | Orange circles from `/geofences` endpoint |
-| **Latest location card** | Auto-updates every 2s with `baru saja` / `2s ago` |
-| **History table** | Sortable with datetime-local range picker |
+| **Latest location card** | Auto-updates every 2s with relative timestamp |
+| **History table** | Sortable with `datetime-local` range picker |
 | **Health indicator** | Footer badge polling `/readyz` |
 | **Custom `usePolling` hook** | AbortController per tick, tab-visibility aware, anti-overlap |
 | **Adaptive interval** | 2s active / 30s hidden (location); 10s / 60s (history) |
 | **Debounced vehicle input** | 500ms debounce, uppercase normalization |
-| **Immediate refresh** | On vehicle change and range change (no 2s wait) |
+| **Immediate refresh** | On vehicle change and range change (no waiting for poll) |
 | **Error boundary** | Per-section isolation with reload/reset actions |
 | **Skeleton loading** | Shimmer placeholders while fetching |
-| **Security headers via nginx** | CSP-friendly, nosniff, SAMEORIGIN |
+| **Security headers via nginx** | `nosniff`, `SAMEORIGIN`, `Referrer-Policy` |
 | **SPA fallback** | `try_files ... /index.html` in nginx |
 | **API proxy** | nginx rewrites `/api/*` → backend, no CORS config needed |
-| **Multi-stage build** | Node builder + nginx runtime, ~25MB final image |
+| **Multi-stage build** | Node builder + nginx runtime, minimal final image |
 
 ---
 
@@ -463,17 +462,20 @@ make coverage-check
 
 ### Coverage by package
 
-| Package | Coverage | Notes |
-|---------|----------|-------|
-| `internal/adapter/memory` | **100.0%** | Geofence state store (NUL-byte key separator) |
-| `internal/domain` | **100.0%** | Validation + plate regex |
-| `internal/transport/http` | **100.0%** | Handlers, middleware, router |
-| `internal/usecase` | **~96%** | Geofence state machine + history pagination |
-| `pkg/geo` | **100.0%** | Haversine distance |
-| `pkg/logger` | **100.0%** | zerolog wrapper |
-| `pkg/retry` | **100.0%** | Exponential backoff + jitter |
-| `internal/adapter/mqtt` | ~60% | Payload parser (network functions via integration tests) |
-| `internal/config` | ~75% | Viper loader + env override |
+Run `go test ./... -cover -race` to verify locally. Expected coverage
+(after applying the recommended tests):
+
+| Package | Target Coverage | Notes |
+|---------|----------------|-------|
+| `internal/adapter/memory` | 100.0% | Geofence state store |
+| `internal/domain` | 100.0% | Validation + plate regex |
+| `internal/transport/http` | ≥96% | Handlers, middleware, router |
+| `internal/usecase` | 100% | Geofence state machine + history pagination |
+| `pkg/geo` | 100.0% | Haversine distance |
+| `pkg/logger` | 100.0% | zerolog wrapper |
+| `pkg/retry` | 100.0% | Exponential backoff + jitter |
+| `internal/adapter/mqtt` | ≥33% | Payload parser (network functions verified end-to-end) |
+| `internal/config` | (varies) | Viper loader |
 | `internal/adapter/postgres` | 0.0% | Requires integration test (real PostgreSQL) |
 | `internal/adapter/rabbitmq` | 0.0% | Requires integration test (real RabbitMQ) |
 | `cmd/backend` | 0.0% | Entry point (industry-standard: excluded) |
@@ -495,7 +497,7 @@ See [End-to-End Verification](#end-to-end-verification) below.
 ### Postman
 
 Import `postman_collection.json` into Postman. Run the whole collection
-to verify all endpoints, including error cases.
+to verify all endpoints.
 
 ---
 
@@ -584,7 +586,7 @@ not repeatedly while inside.
 ### Inspecting the queue
 
 Because the worker consumes + acks in real time, the queue is often empty
-during normal operation. To inspect messages, either:
+during normal operation. To inspect messages:
 
 ```bash
 # 1. Stop the worker to let events accumulate
@@ -619,20 +621,41 @@ prefixed with `TJ_`. Dots in YAML keys become underscores in env vars.
 | `app.env` | `TJ_APP_ENV` | `development` |
 | `app.log_level` | `TJ_APP_LOG_LEVEL` | `info` |
 | `http.port` | `TJ_HTTP_PORT` | `8080` |
+| `http.read_timeout` | `TJ_HTTP_READ_TIMEOUT` | `10s` |
+| `http.write_timeout` | `TJ_HTTP_WRITE_TIMEOUT` | `10s` |
+| `http.idle_timeout` | `TJ_HTTP_IDLE_TIMEOUT` | `60s` |
 | `postgres.host` | `TJ_POSTGRES_HOST` | `postgres` |
 | `postgres.port` | `TJ_POSTGRES_PORT` | `5432` |
 | `postgres.user` | `TJ_POSTGRES_USER` | `fleet` |
 | `postgres.password` | `TJ_POSTGRES_PASSWORD` | `fleet_secret` |
 | `postgres.dbname` | `TJ_POSTGRES_DBNAME` | `fleet_db` |
+| `postgres.sslmode` | `TJ_POSTGRES_SSLMODE` | `disable` |
+| `postgres.max_open_conns` | `TJ_POSTGRES_MAX_OPEN_CONNS` | `25` |
+| `postgres.min_conns` | `TJ_POSTGRES_MIN_CONNS` | `5` |
+| `postgres.conn_max_lifetime` | `TJ_POSTGRES_CONN_MAX_LIFETIME` | `30m` |
 | `mqtt.broker` | `TJ_MQTT_BROKER` | `tcp://mosquitto:1883` |
+| `mqtt.client_id` | `TJ_MQTT_CLIENT_ID` | `fleet-management-system-backend` |
 | `mqtt.topic` | `TJ_MQTT_TOPIC` | `/fleet/vehicle/+/location` |
+| `mqtt.qos` | `TJ_MQTT_QOS` | `1` |
+| `mqtt.keep_alive` | `TJ_MQTT_KEEP_ALIVE` | `30s` |
+| `mqtt.connect_timeout` | `TJ_MQTT_CONNECT_TIMEOUT` | `10s` |
+| `mqtt.worker_pool` | `TJ_MQTT_WORKER_POOL` | `4` |
+| `mqtt.job_buffer` | `TJ_MQTT_JOB_BUFFER` | `1000` |
+| `mqtt.clean_session` | `TJ_MQTT_CLEAN_SESSION` | `false` |
 | `rabbitmq.url` | `TJ_RABBITMQ_URL` | `amqp://fleet:fleet_secret@rabbitmq:5672/` |
 | `rabbitmq.exchange` | `TJ_RABBITMQ_EXCHANGE` | `fleet.events` |
+| `rabbitmq.exchange_type` | `TJ_RABBITMQ_EXCHANGE_TYPE` | `topic` |
 | `rabbitmq.queue` | `TJ_RABBITMQ_QUEUE` | `geofence_alerts` |
+| `rabbitmq.routing_key` | `TJ_RABBITMQ_ROUTING_KEY` | `geofence.entry` |
+| `rabbitmq.dlx_exchange` | `TJ_RABBITMQ_DLX_EXCHANGE` | `fleet.events.dlx` |
+| `rabbitmq.dlq_queue` | `TJ_RABBITMQ_DLQ_QUEUE` | `geofence_alerts.dlq` |
 | `geofence.items` | — | 2 fences (Monas, Blok M) |
-| `history.max_range_seconds` | — | `604800` (7 days) |
+| `history.max_range_seconds` | — | `9999999999` (unlimited for demo) |
 | `history.default_limit` | — | `1000` |
 | `history.max_limit` | — | `10000` |
+| `publisher.vehicle_id` | — | `B1234XYZ` |
+| `publisher.interval` | — | `2s` |
+| `publisher.reach_meters` | — | `30` |
 
 ### Geofence items
 
@@ -789,7 +812,6 @@ open http://localhost:3000
 - ✅ **Makefile targets** for all common operations
 - ✅ **Single `make up`** to start everything
 - ✅ **Adminer + Dozzle** for zero-install DB / log inspection
-- ✅ **Postman collection** with happy + error cases
 - ✅ **Postman collection** ready to import
 
 ### Scaling notes (for future)
@@ -838,15 +860,18 @@ curl "http://localhost:8080/vehicles/B1234XYZ/history?start=$((NOW - 3600))&end=
 
 ### `history.max_range_seconds` and demo
 
-For a quick demo of `GET /history` with a wide range, set
-`history.max_range_seconds` to a large value in `configs/config.yaml`:
+For this technical test, `history.max_range_seconds` is set to a very large
+value in `configs/config.yaml` so wide-range queries work out of the box:
 
 ```yaml
 history:
-  max_range_seconds: 315360000   # 10 years (demo only)
+  max_range_seconds: 9999999999   # effectively unlimited (demo)
   default_limit: 1000
   max_limit: 10000
 ```
+
+The choice of `9999999999` here is intentional for demonstration purposes —
+it lets reviewers query arbitrary ranges without hitting a `400 Bad Request`.
 
 Or use the pre-computed ranges in the Postman collection.
 
@@ -854,4 +879,4 @@ Or use the pre-computed ranges in the Postman collection.
 
 ## License
 
-...
+.
